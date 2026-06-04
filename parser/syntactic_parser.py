@@ -36,6 +36,12 @@ class SyntacticParser:
         words = [w for w, p in tags]
         poses = [p for w, p in tags]
 
+        # 如果有系动词（是/像/成为），优先判定为SVC
+        # 因为系动词连接的是主语和表语，不是连动
+        for i, (w, p) in enumerate(tags):
+            if p == "V_COP":
+                return "SVC"
+
         # 把字句
         if "把" in words:
             return "BA"
@@ -44,7 +50,7 @@ class SyntacticParser:
         if "被" in words:
             return "BEI"
 
-        # 连动句（两个动词连续）
+        # 连动句（两个动词连续，但排除系动词）
         v_count = sum(1 for p in poses if p == "V")
         if v_count >= 2:
             return "SV_V"
@@ -64,11 +70,6 @@ class SyntacticParser:
                 return "COND"
             if "虽然" in words and "但是" in words:
                 return "TURN"
-
-        # 主系表（名词/代词 + 系动词 + 名词/形容词）
-        for i, (w, p) in enumerate(tags):
-            if p == "V_COP":
-                return "SVC"
 
         # 主谓宾
         if "V" in poses and "N" in poses:

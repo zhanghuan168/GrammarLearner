@@ -81,10 +81,10 @@ class GrammarLearner:
 
     def query(self, question):
         """问答"""
-        qtype, entity = self.question_parser.parse(question)
-        print(f"  [问题解析] 类型:{qtype} 实体:{entity}")
+        qtype, entity, relation = self.question_parser.parse(question)
+        print(f"  [问题解析] 类型:{qtype} 实体:{entity} 关系:{relation}")
 
-        answer = self.answer_generator.generate(qtype, entity, question)
+        answer = self.answer_generator.generate(qtype, entity, question, relation)
         return {
             "question": question,
             "type": qtype,
