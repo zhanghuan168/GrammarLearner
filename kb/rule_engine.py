@@ -12,13 +12,24 @@ class RuleEngine:
     """规则引擎：从句法分析结果中抽取事实"""
 
     def __init__(self):
-        # 已知双字词（用于合并被拆分的名词）
+        # 已知多字词（用于合并被拆分的名词）
         self.known_words = {
             "猪八戒", "孙悟空", "沙僧", "唐僧", "西天", "取经",
-            "观音", "菩萨", "长坂坡", "诸葛亮", "隆中", "蜀国",
-            "关羽", "张飞", "刘备", "孟获", "司马懿",
+            "观音", "菩萨",
             "金箍棒", "九齿钉耙", "筋斗云", "火眼金睛",
-            "花果山", "五行山", "流沙河"
+            "花果山", "五行山", "流沙河",
+            "刘备", "关羽", "张飞", "曹操", "孙权", "周瑜", "诸葛亮",
+            "陆逊", "孙策", "华雄", "司马懿", "张辽",
+            "蜀国", "江东",
+            "隆中", "长坂坡",
+            "宋江", "吴用", "卢俊义", "林冲", "武松", "鲁智深", "李逵", "杨志",
+            "晁盖", "高俅", "方腊", "梁山泊", "及时雨", "智多星",
+            "景阳冈", "生辰纲",
+            "贾宝玉", "林黛玉", "薛宝钗", "王熙凤", "史湘云", "妙玉", "元春",
+            "贾母", "刘姥姥", "贾府", "栊翠庵",
+            "通灵宝玉", "金陵十二钗", "大观园",
+            "白龙马", "唐三藏", "紧箍咒", "八卦炉",
+            "天蓬元帅", "卷帘大将", "八十一难",
         }
 
         # 事实模式规则
@@ -58,7 +69,6 @@ class RuleEngine:
 
         current_word = pos_tags[start_idx][0]
 
-        # 检查能否与下一个字合成双字词
         if start_idx + 1 < n:
             next_word = pos_tags[start_idx + 1][0]
             combined = current_word + next_word
@@ -67,32 +77,8 @@ class RuleEngine:
 
         return current_word, 1
 
-    def _get_reverse_relation(self, relation: str) -> str:
-        """获取反向关系名称"""
-        reverse_map = {
-            "师弟": "师兄",
-            "师兄": "师弟",
-            "徒弟": "师父",
-            "师父": "徒弟",
-            "儿子": "父亲",
-            "父亲": "儿子",
-            "女儿": "父亲",
-            "哥哥": "弟弟",
-            "弟弟": "哥哥",
-            "姐姐": "妹妹",
-            "妹妹": "姐姐",
-            "丈夫": "妻子",
-            "妻子": "丈夫",
-        }
-        return reverse_map.get(relation, "")
-
     def _get_noun_tokens(self, pos_tags: List[Tuple]) -> List[str]:
-        """提取所有名词token，合并连续的单字名词
-
-        例如：[圆(N), 盘(N)] → ["圆盘"]（相邻单字合并）
-             [沙(N), 僧(N)] → ["沙僧"]（已知词合并）
-             [第三(NUM), 个(Q), 徒弟(N)] → ["徒弟"]（跳过数量词）
-        """
+        """提取所有名词token，合并连续的单字名词"""
         result = []
         i = 0
         n = len(pos_tags)
@@ -100,28 +86,25 @@ class RuleEngine:
             w, p = pos_tags[i]
             if p in {"N", "PN"}:
                 merged = w
-                # 尝试与下一个字合并
                 if i + 1 < n and pos_tags[i + 1][1] in {"N", "PN"}:
                     next_word = pos_tags[i + 1][0]
                     combined = w + next_word
-                    # 已知词优先
                     if combined in self.known_words:
                         merged = combined
                         i += 2
                         result.append(merged)
                         continue
-                    # 两个相邻单字名词（非量词/数词）合并
-                    excluded = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
-                               "个", "只", "条", "本", "次", "把", "根", "位", "名", "第", "几"}
-                    if w not in excluded and next_word not in excluded:
-                        merged = combined
-                        i += 2
-                        result.append(merged)
-                        continue
+                    elif len(w) == 1 and len(next_word) == 1:
+                        excluded = {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+                                   "个", "只", "条", "本", "次", "把", "根", "位", "名", "第", "几"}
+                        if w not in excluded and next_word not in excluded:
+                            merged = combined
+                            i += 2
+                            result.append(merged)
+                            continue
                 result.append(merged)
                 i += 1
-            elif p == "NUM" and w in {"第"}:
-                # 跳过"第"这类序数标记
+            elif p == "NUM" and w == "第":
                 i += 1
             else:
                 i += 1
@@ -157,10 +140,8 @@ class RuleEngine:
             return {"entities": entities, "relations": relations, "events": []}
 
         # 提取主语（合并系动词前可能连续的单字名词）
-        # 例如：沙+僧+是 → subject = "沙僧"
         subj_end = copula_idx - 1
         subj_start = subj_end
-        # 向前合并连续的单字名词
         while subj_start > 0 and pos_tags[subj_start][1] in {"N", "PN"}:
             prev_word = pos_tags[subj_start - 1][0]
             curr_word = pos_tags[subj_start][0]
@@ -172,9 +153,7 @@ class RuleEngine:
 
         subject_tokens = pos_tags[subj_start:subj_end + 1]
         subject = "".join([w for w, p in subject_tokens])
-        # 如果合并后不是已知词，再试一次从copula-1向前合并单字
         if subject not in self.known_words:
-            # 简单方案：直接取copula-1的词，如果相邻可以合并的话
             w1 = pos_tags[copula_idx - 1][0]
             if subj_start > 0:
                 w0 = pos_tags[subj_start - 1][0]
@@ -204,24 +183,19 @@ class RuleEngine:
 
                 # 合并Z（关系名）- 跳过"第"等修饰词，只取第一个真正的关系名词
                 z_name = ""
-                skip_next_num = False
                 for idx, (w, p) in enumerate(z_tokens):
-                    # 跳过"第"、数量词等修饰成分
                     if w == "第" or w in {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"}:
                         continue
                     if p == "NUM":
                         continue
-                    if p == "Q":  # 量词
+                    if p == "Q":
                         continue
                     if p in {"N", "ADJ"}:
-                        # 合并连续名词（如"师" + "弟" → "师弟"）
                         if z_name:
-                            # 已有内容，尝试合并
                             combined = z_name + w
                             if combined in self.known_words:
                                 z_name = combined
                             elif len(z_name) == 1 and len(w) == 1:
-                                # 相邻单字合并
                                 z_name += w
                             else:
                                 z_name += w
@@ -230,7 +204,6 @@ class RuleEngine:
                     else:
                         break
 
-                # 如果z_name为空，取第一个名词
                 if not z_name:
                     for w, p in z_tokens:
                         if p in {"N", "ADJ"} and w not in {"第", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"}:
@@ -239,8 +212,6 @@ class RuleEngine:
 
                 if y_name and z_name:
                     entities.append({"name": y_name, "type": "人物", "mentions": [y_name]})
-                    # 正向关系：X是Y的Z → (X, Z, Y)
-                    # 例：(猪八戒, 师弟, 孙悟空)
                     relations.append({
                         "subject": subject,
                         "relation": z_name,
@@ -254,7 +225,7 @@ class RuleEngine:
                             "relation": reverse_rel,
                             "object": subject
                         })
-                    return {"entities": entities, "relations": relations, "events": []}  # early exit
+                    return {"entities": entities, "relations": relations, "events": []}
             else:
                 # 简单判断句：X是Y
                 nouns = self._get_noun_tokens(after_copula)
@@ -297,24 +268,17 @@ class RuleEngine:
         return {"entities": entities, "relations": relations, "events": []}
 
     def _extract_sv_v(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
-        """连动句：处理 "X带Y去Z" 结构
-
-        例：唐僧带着孙悟空猪八戒沙僧去西天取经
-        期望: (唐僧, 带着, 孙悟空) (唐僧, 带着, 猪八戒) (唐僧, 带着, 沙僧)
-              (唐僧, 去西天取经, *)
-        """
+        """连动句：处理 "X带Y去Z" 结构"""
         entities = []
         relations = []
 
         agent = None
         patients = []
-        hit_goal = False  # 标记是否遇到过"去/到"
 
         for i, (w, p) in enumerate(pos_tags):
             if w in {"带", "带着"} and i > 0:
                 agent = pos_tags[i - 1][0]
 
-                # 收集带之后的名词，直到遇到"去"或"到"
                 j = i + 1
                 while j < len(pos_tags):
                     tw, tp = pos_tags[j]
@@ -322,8 +286,6 @@ class RuleEngine:
                         j += 1
                         continue
                     if tw in {"去", "到"}:
-                        hit_goal = True
-                        # 遇到"去"，收集目的地信息后break
                         j += 1
                         if j < len(pos_tags):
                             next_word = pos_tags[j][0]
@@ -339,7 +301,7 @@ class RuleEngine:
                         if patient and patient not in patients:
                             patients.append(patient)
                         j += skip
-                        continue  # always continue after consuming tokens
+                        continue
                     j += 1
 
         if agent:
@@ -384,6 +346,28 @@ class RuleEngine:
                 entities.append({"name": agent, "type": "人物", "mentions": [agent]})
                 relations.append({"subject": agent, "relation": f"把{patient}{verb}", "object": verb})
         return {"entities": entities, "relations": relations, "events": []}
+
+    def _get_reverse_relation(self, relation: str) -> str:
+        """获取反向关系名称"""
+        reverse_map = {
+            "师弟": "师兄",
+            "师兄": "师弟",
+            "徒弟": "师父",
+            "师父": "徒弟",
+            "儿子": "父亲",
+            "父亲": "儿子",
+            "女儿": "父亲",
+            "哥哥": "弟弟",
+            "弟弟": "哥哥",
+            "姐姐": "妹妹",
+            "妹妹": "姐姐",
+            "丈夫": "妻子",
+            "妻子": "丈夫",
+            "表妹": "表姐",
+            "表姐": "表妹",
+            "妹妹": "姐姐",
+        }
+        return reverse_map.get(relation, "")
 
 
 def demo():

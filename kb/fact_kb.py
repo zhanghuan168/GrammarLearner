@@ -61,6 +61,24 @@ class FactKB:
             "source": event.get("source", "")
         }
 
+    def add_attribute(self, entity_name: str, attr_name: str, attr_value: str):
+        """为实体添加属性（支持多值）"""
+        if entity_name not in self.entities:
+            self.entities[entity_name] = {
+                "name": entity_name,
+                "type": "未知",
+                "attributes": {},
+                "mentions": [entity_name]
+            }
+        attrs = self.entities[entity_name].setdefault("attributes", {})
+        if attr_name not in attrs:
+            attrs[attr_name] = []
+        if isinstance(attrs[attr_name], list):
+            if attr_value not in attrs[attr_name]:
+                attrs[attr_name].append(attr_value)
+        else:
+            attrs[attr_name] = [attrs[attr_name], attr_value]
+
     def get_entity(self, name: str) -> Optional[Dict]:
         """获取实体"""
         if name in self.entities:
@@ -77,7 +95,7 @@ class FactKB:
         return objs[0] if objs else None
 
     def get_relations_by_subject(self, subject: str) -> List[Tuple[str, str]]:
-        """获取某主体的所有关系（返回去重后的客体列表）"""
+        """获取某主体的所有关系"""
         result = []
         for (subj, rel), objs in self.relations.items():
             if subj == subject:
@@ -98,17 +116,25 @@ class FactKB:
             if rels:
                 parts = []
                 for rel, obj in rels:
-                    if rel == "是":
-                        parts.append(f"是{obj}")
-                    elif rel == "像":
-                        parts.append(f"像{obj}")
-                    else:
-                        parts.append(f"{rel}是{obj}")
+                    parts.append(f"{rel}是{obj}")
                 results.append(f"{entity}，" + "，".join(parts))
             else:
                 info = self.get_entity(entity)
                 if info:
+                    attrs = info.get("attributes", {})
+                    if attrs:
+                        attr_parts = []
+                        for k, v in attrs.items():
+                            if isinstance(v, list):
+                                attr_parts.append(f"{k}是{','.join(v)}")
+                            else:
+                                attr_parts.append(f"{k}是{v}")
+                        if attr_parts:
+                            results.append(f"{entity}，" + "，".join(attr_parts))
+                            return results
                     results.append(f"{entity}是一个{info.get('type', '未知')}。")
+            if not results:
+                results.append(f"知识库中暂无关于'{entity}'的详细信息")
 
         elif question_type == "WHAT":
             events = self.get_events_by_subject(entity)
@@ -162,6 +188,8 @@ def demo():
     kb.add_relation({"subject": "唐僧", "relation": "带着", "object": "孙悟空"})
     kb.add_relation({"subject": "唐僧", "relation": "带着", "object": "猪八戒"})
     kb.add_relation({"subject": "唐僧", "relation": "带着", "object": "沙僧"})
+    kb.add_entity({"name": "及时雨", "type": "绰号"})
+    kb.add_attribute("宋江", "绰号", "及时雨")
 
     print("【知识库测试】")
     print(f"  关系: {kb.relations}")
