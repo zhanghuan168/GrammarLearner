@@ -236,6 +236,59 @@ class RuleEngine:
                 verb = wv
 
         if not verb:
+            # 描写句：X很ADJ → 提取为主谓关系
+            for j in range(subj_idx + 1, n):
+                wj, pj = pos_tags[j]
+                if pj == "ADV" and wj == "很":
+                    # 找后面的形容词
+                    adj_parts = []
+                    for k in range(j + 1, n):
+                        wk, pk = pos_tags[k]
+                        if pk == "ADJ":
+                            adj_parts.append(wk)
+                        elif pk == "ADV":
+                            continue
+                        else:
+                            break
+                    if adj_parts:
+                        adj = "".join(adj_parts)
+                        relations.append({"subject": subject, "relation": f"很{adj}", "object": adj})
+                        entities.append({"name": adj, "type": "性质", "mentions": [adj]})
+                    return {"entities": entities, "relations": relations, "events": []}
+
+            # 比较句：X比Y Adj → (X, 比Y, Adj)
+            for j in range(subj_idx + 1, n):
+                wj, pj = pos_tags[j]
+                if wj == "比" and j + 2 < n:
+                    # 找比后面的名词（被比较的对象）
+                    target_parts = []
+                    k = j + 1
+                    while k < n:
+                        wk, pk = pos_tags[k]
+                        if pk in {"N", "PN"}:
+                            target_parts.append(wk)
+                            k += 1
+                        else:
+                            break
+                    # 找形容词
+                    adj_parts = []
+                    for k2 in range(k, n):
+                        wk2, pk2 = pos_tags[k2]
+                        if pk2 == "ADJ":
+                            adj_parts.append(wk2)
+                        elif pk2 == "ADV":
+                            continue
+                        else:
+                            break
+                    if target_parts and adj_parts:
+                        target = "".join(target_parts)
+                        adj = "".join(adj_parts)
+                        verb_rel = "比" + target
+                        entities.append({"name": target, "type": "对象", "mentions": [target]})
+                        entities.append({"name": adj, "type": "性质", "mentions": [adj]})
+                        relations.append({"subject": subject, "relation": verb_rel, "object": adj})
+                    return {"entities": entities, "relations": relations, "events": []}
+
             return {"entities": entities, "relations": relations, "events": []}
 
         # 双宾语句：给/送/教 X Y
@@ -515,10 +568,29 @@ class RuleEngine:
         return {"entities": entities, "relations": relations, "events": []}
 
     def _extract_sv_v(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
-        """连动句：处理 "X带Y去Z" 结构"""
+        """连动句/能力句：处理 "X带Y去Z" 和 "X会V" 结构"""
         entities = []
         relations = []
 
+        # 判断是哪种子类型：找动词
+        verbs = [(w, p) for w, p in pos_tags if p == "V"]
+        if len(verbs) >= 2 and verbs[0][0] in {"会", "能", "敢", "会", "能"}:
+            # 能力句：X会V / X能V
+            ability_v = verbs[0][0]
+            action_v = verbs[1][0]
+            subj = None
+            for w, p in pos_tags:
+                if p in {"N", "PN"}:
+                    subj = w
+                    break
+            if subj:
+                verb_rel = ability_v + action_v
+                entities.append({"name": subj, "type": "实体", "mentions": [subj]})
+                entities.append({"name": action_v, "type": "动作", "mentions": [action_v]})
+                relations.append({"subject": subj, "relation": verb_rel, "object": action_v})
+            return {"entities": entities, "relations": relations, "events": []}
+
+        # 原有的带Y去Z结构
         agent = None
         patients = []
 
@@ -557,6 +629,41 @@ class RuleEngine:
                 if p != agent:
                     entities.append({"name": p, "type": "人物", "mentions": [p]})
                     relations.append({"subject": agent, "relation": "带着", "object": p})
+
+        return {"entities": entities, "relations": relations, "events": []}
+
+    def _extract_sv_v_ability(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
+        """能力句：处理 X会V 模式，X是主语，V是动词宾语"""
+        entities = []
+        relations = []
+
+        # 找第一个名词作为主语
+        subj = None
+        for w, p in pos_tags:
+            if p in {"N", "PN"} and w not in {"第", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"}:
+                subj = w
+                break
+        if not subj:
+            return {"entities": entities, "relations": relations, "events": []}
+
+        # 收集所有动词
+        verbs = []
+        for w, p in pos_tags:
+            if p == "V":
+                verbs.append(w)
+
+        if len(verbs) >= 2:
+            # 两个动词：第一个是能愿动词
+            ability_v = verbs[0]
+            action_v = verbs[1]
+            verb_rel = ability_v + action_v
+            entities.append({"name": subj, "type": "实体", "mentions": [subj]})
+            entities.append({"name": action_v, "type": "动作", "mentions": [action_v]})
+            relations.append({"subject": subj, "relation": verb_rel, "object": action_v})
+        elif len(verbs) == 1:
+            verb_rel = verbs[0]
+            entities.append({"name": subj, "type": "实体", "mentions": [subj]})
+            relations.append({"subject": subj, "relation": verb_rel, "object": ""})
 
         return {"entities": entities, "relations": relations, "events": []}
 
