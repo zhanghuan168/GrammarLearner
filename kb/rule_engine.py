@@ -2,7 +2,7 @@
 规则引擎 - 从句法树抽取事实
 参考演绎层v8的两阶段设计：规则匹配 → 事实入库
 
-改进：处理"的"字结构和连动句（合并单字名词）
+改进：处理"的"字结构和连动句（合并单字名词）、SVO宾语合并
 """
 
 from typing import Dict, List, Tuple
@@ -30,6 +30,16 @@ class RuleEngine:
             "通灵宝玉", "金陵十二钗", "大观园",
             "白龙马", "唐三藏", "紧箍咒", "八卦炉",
             "天蓬元帅", "卷帘大将", "八十一难",
+            # 小学常用词
+            "小学生", "学生", "书包", "读书", "唱歌", "足球",
+            "超市", "公园", "春游", "勇敢", "好吃", "休息", "努力",
+            "下雨", "玩具", "窗户", "作业", "练习",
+            "老师", "妈妈", "爸爸", "小明", "同学", "同学们",
+            "新书包", "小鱼儿", "好孩子",
+            "池塘", "池塘里",
+            "结拜兄弟", "结拜", "清河县", "渭州",
+            "表妹", "表姐", "提辖", "青龙偃月刀", "丈八蛇矛",
+            "小明", "小鸟", "小鱼", "池塘里",
         }
 
         # 事实模式规则
@@ -47,8 +57,20 @@ class RuleEngine:
         self.verb_relation_map = {
             "是": "是", "像": "像", "成为": "成为", "变成": "变成",
             "有": "有", "会": "会", "能": "能", "喜欢": "喜欢", "爱": "爱",
-            "帮助": "帮助", "收": "收", "带": "带", "去": "去",
-            "守护": "守护", "住": "住在", "收": "收",
+            "帮助": "帮助", "收": "收", "带": "带", "去": "去", "来": "来",
+            "守护": "守护", "住在": "住在", "读": "读", "唱": "唱", "踢": "踢",
+            "打": "打", "擦": "擦", "买": "买", "借": "借", "做": "做",
+            "送": "送", "给": "给", "批评": "批评", "打碎": "打碎",
+            "要": "要", "想要": "想要", "应该": "应该", "让": "让", "请": "请",
+            "比": "比", "下": "下", "下雨": "下雨", "进步": "进步",
+        }
+
+        # 动宾绑定（动词后应接名词宾语的动词）
+        self.vn_bindings = {
+            "有", "会", "能", "喜欢", "爱",
+            "读", "唱", "踢", "打", "擦",
+            "买", "借", "做", "送", "给",
+            "下", "下雨",
         }
 
     def extract_facts(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
@@ -110,26 +132,176 @@ class RuleEngine:
                 i += 1
         return result
 
+    def _extract_noun_phrase(self, pos_tags: List[Tuple], start_idx: int) -> Tuple[str, int]:
+        """提取名词短语（一直合并到非名词为止），返回 (名词短语, 跳过的token数)"""
+        n = len(pos_tags)
+        words = []
+        i = start_idx
+        while i < n:
+            w, p = pos_tags[i]
+            if p in {"N", "PN", "NUM"}:
+                # 尝试合并下一个名词
+                if i + 1 < n:
+                    nw, np_ = pos_tags[i + 1]
+                    if np_ in {"N", "PN"}:
+                        combined = w + nw
+                        if combined in self.known_words:
+                            words.append(combined)
+                            i += 2
+                            continue
+                        elif len(w) == 1 and len(nw) == 1:
+                            words.append(w + nw)
+                            i += 2
+                            continue
+                words.append(w)
+                i += 1
+            elif p == "ADJ" and words:
+                # 形容词+名词：尝试合并
+                if i + 1 < n:
+                    nw, np_ = pos_tags[i + 1]
+                    if np_ in {"N", "PN"}:
+                        combined = w + nw
+                        if combined in self.known_words:
+                            words.append(combined)
+                            i += 2
+                            continue
+                        elif len(w) == 1 and len(nw) == 1:
+                            words.append(w + nw)
+                            i += 2
+                            continue
+                words.append(w)
+                i += 1
+            else:
+                break
+        return "".join(words), len(words)
+
     # ========== 抽取函数 ==========
 
     def _extract_sv(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
-        """主谓句"""
-        entities = []
-        for word, pos in pos_tags:
-            if pos in {"N", "PN"}:
-                entities.append({"name": word, "type": "实体", "mentions": [word]})
-        return {"entities": entities, "relations": [], "events": []}
-
-    def _extract_svc(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
-        """主系表：处理 "X是Y的Z" 结构
-
-        例：猪八戒是孙悟空的师弟 → (猪八戒, 师弟, 孙悟空)
-        例：沙僧是唐僧的徒弟 → (沙僧, 徒弟, 唐僧)
+        """主谓句：处理 S-V / S-V-O 结构，提取动宾关系
+        支持：
+        - 标准动宾：妈妈去超市买菜
+        - 双宾语句：老师给我一本书
+        - 比较句：爸爸比妈妈高
         """
         entities = []
         relations = []
 
-        # 找系动词位置
+        n = len(pos_tags)
+        if n == 0:
+            return {"entities": entities, "relations": relations, "events": []}
+
+        # 找主语（第一个名词/代词）
+        subj_idx = None
+        for i, (w, p) in enumerate(pos_tags):
+            if p in {"N", "PN"} and w not in {"第", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"}:
+                subj_idx = i
+                break
+
+        if subj_idx is None:
+            return {"entities": entities, "relations": relations, "events": []}
+
+
+        subject = pos_tags[subj_idx][0]
+        # 合并相邻名词作为主语
+        if subj_idx + 1 < n and pos_tags[subj_idx + 1][1] in {"N", "PN"}:
+            combined = subject + pos_tags[subj_idx + 1][0]
+            if combined in self.known_words:
+                subject = combined
+                subj_idx += 1
+        entities.append({"name": subject, "type": "实体", "mentions": [subject]})
+
+
+        # 跳过修饰词找动词/介词
+        verb_idx = subj_idx + 1
+        while verb_idx < n and pos_tags[verb_idx][1] in {"NUM", "Q"}:
+            verb_idx += 1
+
+        verb = None
+        while verb_idx < n:
+            wv, pv = pos_tags[verb_idx]
+            if pv == "V" or (wv == "给" and pv == "P"):
+                verb = wv
+                break
+            elif pv in {"N", "PN", "ADJ"}:
+                # 遇到名词停止
+                break
+            verb_idx += 1
+
+        # 特殊动词恢复：某些动词被POS标注器误标为N，但实际是V
+        # 在"代词+动词+代词+名词"模式中，动词位置的N应视为V
+        if not verb and verb_idx < n:
+            wv, pv = pos_tags[verb_idx]
+            if pv == "N" and wv in {"教", "送", "告诉", "叫", "让", "请"}:
+                verb = wv
+
+        if not verb:
+            return {"entities": entities, "relations": relations, "events": []}
+
+        # 双宾语句：给/送/教 X Y
+        if verb in {"给", "送", "教", "告诉"}:
+            obj_idx = verb_idx + 1
+            while obj_idx < n and pos_tags[obj_idx][1] in {"NUM", "Q"}:
+                obj_idx += 1
+            obj_parts = []
+            for j in range(obj_idx, n):
+                wj, pj = pos_tags[j]
+                if pj in {"N", "PN"}:
+                    obj_parts.append(wj)
+                elif pj in {"NUM", "Q"}:
+                    continue
+                else:
+                    break
+            if len(obj_parts) >= 2:
+                # 格式：主语+送+间接宾语(人)+直接宾语(物)
+                first_obj = obj_parts[0]  # 通常是"我"等人称
+                # 直接宾语可能是多个字（合并）
+                second_obj = "".join(obj_parts[1:])
+                entities.append({"name": first_obj, "type": "人物", "mentions": [first_obj]})
+                entities.append({"name": second_obj, "type": "事物", "mentions": [second_obj]})
+                if verb == "给":
+                    relations.append({"subject": subject, "relation": f"给{first_obj}", "object": second_obj})
+                else:
+                    relations.append({"subject": subject, "relation": f"{verb}{first_obj}", "object": second_obj})
+            return {"entities": entities, "relations": relations, "events": []}
+
+        # 收集宾语
+        obj_idx = verb_idx + 1
+        while obj_idx < n and pos_tags[obj_idx][1] in {"NUM", "Q"}:
+            obj_idx += 1
+
+        obj_parts = []
+        for j in range(obj_idx, n):
+            wj, pj = pos_tags[j]
+            if pj in {"N", "PN"}:
+                obj_parts.append(wj)
+            elif pj == "ADJ":
+                obj_parts.append(wj)
+            else:
+                break
+
+        if not obj_parts:
+            return {"entities": entities, "relations": relations, "events": []}
+
+        obj = "".join(obj_parts)
+        verb_rel = self.verb_relation_map.get(verb, verb)
+
+        # 动宾合并：保留关系为动宾短语，宾语保持为名词本身
+        if verb in self.vn_bindings:
+            vn = verb + obj_parts[0]
+            if vn in self.known_words or (len(verb) == 1 and len(obj_parts[0]) <= 3):
+                verb_rel = vn  # 关系用动宾短语
+
+        entities.append({"name": obj, "type": "事物", "mentions": [obj]})
+        relations.append({"subject": subject, "relation": verb_rel, "object": obj})
+
+        return {"entities": entities, "relations": relations, "events": []}
+
+    def _extract_svc(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
+        """主系表：处理 "X是Y的Z" 结构"""
+        entities = []
+        relations = []
+
         copula_idx = None
         for i, (w, p) in enumerate(pos_tags):
             if p == "V_COP":
@@ -139,26 +311,37 @@ class RuleEngine:
         if not copula_idx or copula_idx == 0 or copula_idx >= len(pos_tags) - 1:
             return {"entities": entities, "relations": relations, "events": []}
 
-        # 提取主语（合并系动词前可能连续的单字名词）
-        subj_end = copula_idx - 1
-        subj_start = subj_end
-        while subj_start > 0 and pos_tags[subj_start][1] in {"N", "PN"}:
-            prev_word = pos_tags[subj_start - 1][0]
-            curr_word = pos_tags[subj_start][0]
-            combined = prev_word + curr_word
-            if combined in self.known_words or (len(prev_word) == 1 and len(curr_word) == 1):
-                subj_start -= 1
+        # 提取主语：合并系动词前的连续名词
+        # 找主语范围（从copula往前，合并相邻的名词/形容词）
+        subj_start = copula_idx - 1
+        while subj_start > 0 and pos_tags[subj_start][1] in {"N", "PN", "ADJ"}:
+            # 如果前一个字也是名/形，尝试合并
+            if subj_start > 0 and pos_tags[subj_start - 1][1] in {"N", "PN", "ADJ"}:
+                prev_word = pos_tags[subj_start - 1][0]
+                curr_word = pos_tags[subj_start][0]
+                combined = prev_word + curr_word
+                # 检查这个组合是否在词典或已知词中
+                if combined in self.known_words or len(curr_word) == 1:
+                    subj_start -= 1
+                else:
+                    break
             else:
                 break
 
-        subject_tokens = pos_tags[subj_start:subj_end + 1]
-        subject = "".join([w for w, p in subject_tokens])
-        if subject not in self.known_words:
-            w1 = pos_tags[copula_idx - 1][0]
-            if subj_start > 0:
-                w0 = pos_tags[subj_start - 1][0]
-                if w0 + w1 in self.known_words:
-                    subject = w0 + w1
+        subject = "".join([w for w, p in pos_tags[subj_start:copula_idx]])
+        # 进一步合并：检查subject末尾的字是否能和已知词合并
+        if subject not in self.known_words and len(subject) >= 2:
+            for k in self.known_words:
+                if len(k) >= 2 and k.endswith(subject[-2:]):
+                    # 找到了以subject结尾的已知词，尝试扩展
+                    prefix = k[:-len(subject[-2:])]
+                    if prefix in {"".join([w for w, p in pos_tags[:subj_start]])}:
+                        subject = k
+                        break
+                    # 简化：直接检查k的前两个字是否匹配
+                    if len(subject) >= 2 and k.startswith(subject[:2]):
+                        subject = k
+                        break
 
         copula_word = pos_tags[copula_idx][0]
         after_copula = pos_tags[copula_idx + 1:]
@@ -166,7 +349,6 @@ class RuleEngine:
         entities.append({"name": subject, "type": "人物", "mentions": [subject]})
 
         if copula_word == "是":
-            # 查找 "的" 字
             de_idx = None
             for i, (w, p) in enumerate(after_copula):
                 if w == "的":
@@ -174,21 +356,17 @@ class RuleEngine:
                     break
 
             if de_idx is not None and de_idx > 0:
-                # X是Y的Z 结构
-                y_tokens = after_copula[:de_idx]  # Y部分（关系对象）
-                z_tokens = after_copula[de_idx + 1:]  # Z部分（关系名）
+                # X是Y的Z
+                y_tokens = after_copula[:de_idx]
+                z_tokens = after_copula[de_idx + 1:]
 
-                # 合并Y
                 y_name, _ = self._merge_noun_block(y_tokens, 0)
 
-                # 合并Z（关系名）- 跳过"第"等修饰词，只取第一个真正的关系名词
                 z_name = ""
                 for idx, (w, p) in enumerate(z_tokens):
                     if w == "第" or w in {"一", "二", "三", "四", "五", "六", "七", "八", "九", "十"}:
                         continue
-                    if p == "NUM":
-                        continue
-                    if p == "Q":
+                    if p in {"NUM", "Q"}:
                         continue
                     if p in {"N", "ADJ"}:
                         if z_name:
@@ -217,7 +395,6 @@ class RuleEngine:
                         "relation": z_name,
                         "object": y_name
                     })
-                    # 反向关系（自动建立）
                     reverse_rel = self._get_reverse_relation(z_name)
                     if reverse_rel and reverse_rel != z_name:
                         relations.append({
@@ -228,14 +405,15 @@ class RuleEngine:
                     return {"entities": entities, "relations": relations, "events": []}
             else:
                 # 简单判断句：X是Y
-                nouns = self._get_noun_tokens(after_copula)
-                if nouns:
-                    complement = nouns[0]
-                    if complement and complement != subject:
-                        entities.append({"name": complement, "type": "描述", "mentions": [complement]})
-                        relations.append({"subject": subject, "relation": "是", "object": complement})
+                if after_copula:
+                    first_word = after_copula[0][0]
+                    first_pos = after_copula[0][1]
+                    if first_pos in {"N", "PN"}:
+                        noun_phrase, skip = self._extract_noun_phrase(after_copula, 0)
+                        if noun_phrase and noun_phrase != subject:
+                            entities.append({"name": noun_phrase, "type": "描述", "mentions": [noun_phrase]})
+                            relations.append({"subject": subject, "relation": "是", "object": noun_phrase})
         else:
-            # 比喻句：X像Y
             nouns = self._get_noun_tokens(after_copula)
             if nouns:
                 complement = nouns[0]
@@ -246,23 +424,92 @@ class RuleEngine:
         return {"entities": entities, "relations": relations, "events": []}
 
     def _extract_svo(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
-        """主谓宾：查找 N-V-N 模式"""
+        """主谓宾：处理 N-V-N 模式，支持动宾合并"""
         entities = []
         relations = []
 
         i = 0
-        while i < len(pos_tags):
+        n = len(pos_tags)
+        while i < n:
             w1, p1 = pos_tags[i]
-            if p1 in {"N", "PN"} and i + 2 < len(pos_tags):
-                w2, p2 = pos_tags[i + 1]
-                w3, p3 = pos_tags[i + 2]
-                if p2 == "V" and p3 in {"N", "PN"}:
-                    verb_rel = self.verb_relation_map.get(w2, w2)
-                    entities.append({"name": w1, "type": "实体", "mentions": [w1]})
-                    entities.append({"name": w3, "type": "实体", "mentions": [w3]})
-                    relations.append({"subject": w1, "relation": verb_rel, "object": w3})
-                    i += 3
-                    continue
+            if p1 not in {"N", "PN"}:
+                i += 1
+                continue
+
+            # 合并相邻名词作为主语
+            subject = w1
+            if i + 1 < n and pos_tags[i + 1][1] in {"N", "PN"}:
+                combined = w1 + pos_tags[i + 1][0]
+                if combined in self.known_words:
+                    subject = combined
+                    i += 1
+
+            entities.append({"name": subject, "type": "实体", "mentions": [subject]})
+
+            # 跳过 NUM/Q 等修饰词找动词
+            verb_idx = i + 1
+            while verb_idx < n and pos_tags[verb_idx][1] in {"NUM", "Q"}:
+                verb_idx += 1
+
+            verb = None
+            while verb_idx < n:
+                wv, pv = pos_tags[verb_idx]
+                if pv == "V" or (wv == "给" and pv == "P"):
+                    verb = wv
+                    break
+                elif pv in {"N", "PN", "ADJ"}:
+                    break
+                verb_idx += 1
+
+            if not verb:
+                i += 1
+                continue
+
+            # 收集宾语
+            obj_idx = verb_idx + 1
+            while obj_idx < n and pos_tags[obj_idx][1] in {"NUM", "Q"}:
+                obj_idx += 1
+
+            obj_parts = []
+            indirect_obj = None  # 双宾语：间接宾语（如"我"）
+            for j in range(obj_idx, n):
+                wj, pj = pos_tags[j]
+                if pj in {"N", "PN"}:
+                    obj_parts.append(wj)
+                elif pj == "ADJ":
+                    obj_parts.append(wj)
+                elif pj in {"NUM", "Q"}:
+                    continue  # 跳过数量词
+                else:
+                    break
+
+            verb_rel = self.verb_relation_map.get(verb, verb)
+
+            if obj_parts:
+                obj = "".join(obj_parts)
+
+                # 双宾语句：给/送/教 X Y → (主语, 给X, Y) + (X, 收到, Y)
+                if verb in {"给", "送", "教", "告诉"} and len(obj_parts) >= 2:
+                    first_obj = obj_parts[0]
+                    second_obj = obj_parts[1]
+                    entities.append({"name": first_obj, "type": "人物", "mentions": [first_obj]})
+                    entities.append({"name": second_obj, "type": "事物", "mentions": [second_obj]})
+                    relations.append({"subject": subject, "relation": f"给{first_obj}", "object": second_obj})
+                    # 逆关系
+                    if first_obj != second_obj:
+                        relations.append({"subject": first_obj, "relation": f"收到自{subject}", "object": second_obj})
+                else:
+                    # 动宾合并：保留关系为动宾短语，但宾语保持为名词本身
+                    if verb in self.vn_bindings and len(obj_parts) >= 1:
+                        vn = verb + obj_parts[0]
+                        if vn in self.known_words or (len(verb) == 1 and len(obj_parts[0]) <= 3):
+                            verb_rel = vn  # 关系用动宾短语
+                            # 宾语保持为名词（不用vn覆盖）
+                    entities.append({"name": obj, "type": "事物", "mentions": [obj]})
+                    relations.append({"subject": subject, "relation": verb_rel, "object": obj})
+
+
+
             i += 1
 
         return {"entities": entities, "relations": relations, "events": []}
@@ -326,11 +573,15 @@ class RuleEngine:
         for i, (w, p) in enumerate(pos_tags):
             if w == "把" and i > 0 and i + 2 < len(pos_tags):
                 agent = pos_tags[i - 1][0]
-                patient = pos_tags[i + 1][0]
-                verb = pos_tags[i + 2][0] if i + 2 < len(pos_tags) else "未知"
+                # 合并宾语
+                obj_phrase, _ = self._extract_noun_phrase(pos_tags, i + 1)
+                verb_idx = i + 1
+                while verb_idx < len(pos_tags) and pos_tags[verb_idx][1] not in {"V", "N"}:
+                    verb_idx += 1
+                verb = pos_tags[verb_idx][0] if verb_idx < len(pos_tags) else "做"
                 entities.append({"name": agent, "type": "人物", "mentions": [agent]})
-                entities.append({"name": patient, "type": "事物", "mentions": [patient]})
-                relations.append({"subject": agent, "relation": f"把{patient}{verb}", "object": verb})
+                entities.append({"name": obj_phrase, "type": "事物", "mentions": [obj_phrase]})
+                relations.append({"subject": agent, "relation": f"把{obj_phrase}{verb}", "object": verb})
         return {"entities": entities, "relations": relations, "events": []}
 
     def _extract_bei(self, tree: Dict, pos_tags: List[Tuple[str, str]]) -> Dict:
@@ -341,7 +592,10 @@ class RuleEngine:
             if w == "被" and i > 0 and i + 2 < len(pos_tags):
                 patient = pos_tags[i - 1][0]
                 agent = pos_tags[i + 1][0]
-                verb = pos_tags[i + 2][0] if i + 2 < len(pos_tags) else "未知"
+                verb_idx = i + 2
+                while verb_idx < len(pos_tags) and pos_tags[verb_idx][1] not in {"V", "N"}:
+                    verb_idx += 1
+                verb = pos_tags[verb_idx][0] if verb_idx < len(pos_tags) else "做"
                 entities.append({"name": patient, "type": "事物", "mentions": [patient]})
                 entities.append({"name": agent, "type": "人物", "mentions": [agent]})
                 relations.append({"subject": agent, "relation": f"把{patient}{verb}", "object": verb})
@@ -368,41 +622,3 @@ class RuleEngine:
             "妹妹": "姐姐",
         }
         return reverse_map.get(relation, "")
-
-
-def demo():
-    engine = RuleEngine()
-
-    print("【规则引擎测试】")
-
-    # 1. SVC: X是Y的Z
-    print("\n1. '猪八戒是孙悟空的师弟'")
-    tags = [("猪八戒", "N"), ("是", "V_COP"), ("孙悟空", "N"), ("的", "PART"), ("师", "N"), ("弟", "N")]
-    tree = {"type": "SVC"}
-    facts = engine.extract_facts(tree, tags)
-    print(f"  关系: {[(r['subject'], r['relation'], r['object']) for r in facts['relations']]}")
-
-    # 2. SVC: 沙僧（单字合并）
-    print("\n2. '沙僧是唐僧的徒弟'")
-    tags = [("沙", "N"), ("僧", "N"), ("是", "V_COP"), ("唐", "N"), ("僧", "N"), ("的", "PART"), ("徒", "N"), ("弟", "N")]
-    tree = {"type": "SVC"}
-    facts = engine.extract_facts(tree, tags)
-    print(f"  关系: {[(r['subject'], r['relation'], r['object']) for r in facts['relations']]}")
-
-    # 3. SV_V: 连动句
-    print("\n3. '唐僧带着孙悟空猪八戒沙僧去西天取经'")
-    tags = [("唐僧", "N"), ("带", "V"), ("着", "PART"), ("孙悟空", "N"), ("猪八戒", "N"), ("沙", "N"), ("僧", "N"), ("去", "V"), ("西天", "N"), ("取经", "N")]
-    tree = {"type": "SV_V"}
-    facts = engine.extract_facts(tree, tags)
-    print(f"  关系: {[(r['subject'], r['relation'], r['object']) for r in facts['relations']]}")
-
-    # 4. 比喻
-    print("\n4. '月亮像圆盘'")
-    tags = [("月亮", "N"), ("像", "V_COP"), ("圆", "N"), ("盘", "N")]
-    tree = {"type": "SVC"}
-    facts = engine.extract_facts(tree, tags)
-    print(f"  关系: {[(r['subject'], r['relation'], r['object']) for r in facts['relations']]}")
-
-
-if __name__ == "__main__":
-    demo()
